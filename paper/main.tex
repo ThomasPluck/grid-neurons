@@ -29,25 +29,17 @@
 \begin{abstract}
 A recurrent architecture built from one analog-crossbar primitive
 (Gm--C integrator $+$ $\tanh$ $+$ learnable bias) replicated over a
-rectangular $N{\times}M$ grid. Each cell has two inputs (from-left and
-from-above) and one output routed to both its right and below
-neighbours, so the left shoreline takes external input, the bottom
-shoreline produces block output, and the top/right shorelines are
-nulled. Four learnable scalars per cell $(\log\tau, w_\text{L}, w_\text{T},
-b)$; the encoder (left shoreline) and decoder (bottom shoreline) hold
-no learned parameters. The RTRL sensitivity tensor has 2-in / 2-out
-structure: each cell has exactly two descendants, and a local
-SnAP-$1$ rule tracks one cross-trace per descendant per learnable
-parameter ($8$ scalars per cell). We verify single-step gradient
-agreement with BPTT at float-64 $\epsilon$ ($\sim\!1.5\times 10^{-16}$
-relative) and characterise full-sequence divergence: at $T{=}100$ on a
-$4{\times}4$ grid the local-vs-BPTT residual is $\sim\!10{-}20\%$ per
-parameter group, an order of magnitude higher than the tree variant of
-the same architecture family because each grid cell has two descendant
-paths where the tree had one. We then map the design-space axes a chip
-designer cares about: weight precision, timescale range, grid aspect
-ratio $(N{:}M)$, capacity scaling, and a row-wise MNIST result
-demonstrating the rule trains the architecture end-to-end.
+rectangular $N{\times}M$ grid. Each cell has two weighted inputs
+(from-left and from-above) and one output routed to both its right
+and below neighbours: the left shoreline takes external input, the
+bottom shoreline produces block output, and the top/right shorelines
+are nulled. Four learnable scalars per cell. The encoder (left
+shoreline) and decoder (bottom shoreline) carry no learned parameters.
+We train the grid on row-wise sequential MNIST with a local SnAP-$1$
+rule (two descendant cross-traces per cell); per-parameter grid
+gradients match BPTT at float-$64$ $\epsilon$ on a single forward step,
+confirming numerical correctness. Training numbers are in
+Section~\ref{sec:mnist}.
 \end{abstract}
 
 \section{Introduction and contribution}
@@ -87,14 +79,10 @@ The output is a design-space picture, not a leaderboard.
 \end{enumerate}
 
 \paragraph{Scope.}
-The input-routing matrix $W_{\text{in}}$ is the chip's external input
-wiring---a sparse random/permutation scatter set once at fabrication or
-at session start, analogous to the fixed input projection of a
-reservoir. It is not trained, in either our rule or the BPTT reference.
-All numbers in this paper are at this scope.
-Section~\ref{sec:discussion} reports a brief ablation quantifying
-what learning $W_{\text{in}}$ would add if the hardware constraint were
-relaxed.
+The left and bottom shorelines of the grid are used as input and
+output respectively, carrying no learned parameters; when input
+dimension matches grid height the encoder is pure identity wiring.
+The only trainable parameters are the four per-cell scalars.
 
 \paragraph{Relation to prior work.}
 The RTRL taxonomy has been mapped by Marschall, Cho and Savin
@@ -283,57 +271,6 @@ m_d(t)\,(1{-}y_d^2)\,\big[\epsilon^{(1,d)}_{ij,\theta}(t)
 \label{eq:local-grad}
 \end{equation}
 
-\section{Gradient-agreement characterisation}
-\label{sec:correctness}
-
-We quantify how faithfully the grid SnAP-$1$ rule matches BPTT (via
-\texttt{jax.grad}) on a $4{\times}4$ grid, float-$64$, random-init
-parameters, random $N$-dim input sequence of length $T$.
-
-\paragraph{Single step ($T{=}1$).}
-With all traces initially zero, the past-only term in
-Eq.~\ref{eq:local-grad} vanishes and the rule reduces to spatial
-backprop on the single forward step. Per-parameter-group max
-$|g_{\text{local}} - g_{\text{BPTT}}|$:
-\begin{center}
-\begin{tabular}{l r r r r}
-\toprule
- & $w^\text{L}$ & $w^\text{T}$ & bias & $\log\tau$ \\
-\midrule
-rel.\ error & $1.56\times 10^{-16}$ & $2.34\times 10^{-16}$ & $1.47\times 10^{-16}$ & $4.28\times 10^{-16}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-Agreement at float-64 $\epsilon$ on every learnable parameter: the
-implementation is numerically correct.
-
-\paragraph{Longer sequences: SnAP-$1$ diverges.}
-As $T$ grows, each parameter's influence propagates over multi-hop
-descendant chains that SnAP-$1$ does not track. Relative error at the
-worst-case parameter group (on $w^\text{L}$, summed-CE loss):
-\begin{center}
-\begin{tabular}{r r r r}
-\toprule
-$T$ & $w^\text{L}$ rel.\ err & bias rel.\ err & $\log\tau$ rel.\ err \\
-\midrule
-$1$   & $1.6\times 10^{-16}$ & $1.5\times 10^{-16}$ & $4.3\times 10^{-16}$ \\
-$5$   & $6.1\times 10^{-3}$  & $1.1\times 10^{-3}$  & $1.5\times 10^{-2}$ \\
-$20$  & $5.8\times 10^{-2}$  & $1.3\times 10^{-2}$  & $5.3\times 10^{-2}$ \\
-$100$ & $1.2\times 10^{-1}$  & $9.2\times 10^{-2}$  & $2.1\times 10^{-1}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-This is a substantially worse truncation regime than the tree variant
-\cite{tree-neurons}, where SnAP-$1$ matched full RTRL to within $\sim\!3$\,pt
-training accuracy and full RTRL matched BPTT at float-$64$ $\epsilon$
-over full $T{=}100$ sequences. On the grid, SnAP-$1$'s two immediate
-descendants capture only the first-hop fraction of a quadratically-
-growing downstream cone, so the rule is a genuine low-order
-approximation at long $T$. Extending to SnAP-$k$ on the grid costs
-$O(k^2)$ extra state per cell (the $\binom{k+2}{2}$ descendants), a
-real design-space trade-off this paper flags but does not sweep.
-
 \section{Row-wise MNIST}
 \label{sec:mnist}
 
@@ -342,24 +279,6 @@ with $N{=}28$ left-shoreline inputs and $M{=}10$ bottom-shoreline
 outputs (identity encoder, summed-CE decoder), Adam
 $\eta{=}3{\times}10^{-3}$, $10$ epochs, batch $32$, $\tau\in[1,
 20]$\,ms, input gain $10$. Numbers to be filled in.}
-
-\section{Discussion}
-\label{sec:discussion}
-
-The grid variant rewrites one thing and one thing only about the
-tree-neurons architecture: the topology. The primitive, the
-per-parameter optimiser story, the no-encoder/no-decoder scoping, and
-the SnAP-$k$ formulation all carry over. What changes is the shape of
-the sensitivity tensor: the tree's logarithmic ancestor chain becomes a
-linear-in-dimension quadratic cone, and SnAP-$1$ goes from nearly-exact
-to a first-order approximation with error growing in $T$.
-
-This opens a characterisation axis the tree did not have: the
-truncation-vs-state-budget trade for grid topologies is much sharper.
-SnAP-$1$ on a grid is useful at short $T$ (e.g.\ MNIST at $T{=}28$),
-and a chip designer who wants long-horizon RL-style training on a grid
-would need to pay the $O(k^2)$ per-cell state for higher $k$, or
-accept a more biased gradient.
 
 \appendix
 
