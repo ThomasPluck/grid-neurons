@@ -12,6 +12,8 @@ import jax
 
 
 def main():
+    import sys
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--grad", choices=["bptt", "local"], default="local")
     ap.add_argument("--epochs", type=int, default=10)

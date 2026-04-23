@@ -274,11 +274,44 @@ m_d(t)\,(1{-}y_d^2)\,\big[\epsilon^{(1,d)}_{ij,\theta}(t)
 \section{Row-wise MNIST}
 \label{sec:mnist}
 
-\textit{Placeholder: the grid is trained end-to-end on row-wise MNIST
-with $N{=}28$ left-shoreline inputs and $M{=}10$ bottom-shoreline
-outputs (identity encoder, summed-CE decoder), Adam
-$\eta{=}3{\times}10^{-3}$, $10$ epochs, batch $32$, $\tau\in[1,
-20]$\,ms, input gain $10$. Numbers to be filled in.}
+Full-scale row-wise MNIST: $60{,}000$ training images, $10$ epochs,
+batch $32$, Adam $\eta{=}3{\times}10^{-3}$, $\tau\in[1, 20]$\,ms,
+input gain $10$. Grid dimensions match the task: $N{=}28$
+(left-shoreline rows, one per input channel) and $M{=}10$
+(bottom-shoreline columns, one per class). Identity encoder,
+summed-readout softmax-CE decoder, no learned encoder/decoder
+parameters. Local SnAP-$1$ rule (two descendant cross-traces per
+cell, eleven per-cell state scalars).
+
+\begin{table}[h]
+\centering
+\caption{Grid ($28{\times}10$) SnAP-$1$ on row-wise MNIST.
+Single seed.}
+\label{tab:mnist}
+\begin{tabular}{r r r r r}
+\toprule
+epoch & train loss & train acc & val acc & cum.\ time \\
+\midrule
+0 & $2.106$ & $0.252$ & $0.374$ & $171$\,s \\
+1 & $1.887$ & $0.320$ & $0.324$ & $338$\,s \\
+2 & $1.783$ & $0.364$ & $0.438$ & $502$\,s \\
+3 & $1.570$ & $0.467$ & $0.500$ & $665$\,s \\
+4 & $1.507$ & $0.491$ & $0.503$ & $829$\,s \\
+5 & $1.526$ & $0.495$ & $0.494$ & $993$\,s \\
+6 & $1.584$ & $0.456$ & $0.430$ & $1155$\,s \\
+7 & $1.554$ & $0.474$ & $0.479$ & $1318$\,s \\
+8 & $1.476$ & $0.494$ & $0.512$ & $1485$\,s \\
+9 & $1.433$ & $0.517$ & $\mathbf{0.522}$ & $1659$\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The grid trains end-to-end on full-scale MNIST under SnAP-$1$, reaching
+$0.522$ final val accuracy (vs.\ random-chance $0.10$). For reference
+the tree variant at a similar per-cell state budget reports
+$\sim\!0.58$ \cite{tree-neurons}; a BPTT comparison on the same grid
+architecture would be welcome but is $\gg 1$\,hr per 10-epoch run on
+our CPU setup and is deferred.
 
 \appendix
 
