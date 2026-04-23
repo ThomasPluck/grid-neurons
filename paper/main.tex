@@ -1,0 +1,510 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+
+\lstset{basicstyle=\ttfamily\small, columns=fullflexible, breaklines=true,
+        frame=single, xleftmargin=\parindent}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black, urlcolor=blue!50!black,
+            citecolor=blue!50!black}
+
+\title{Silicon-Aware Local RTRL on a Hardware-Primitive Grid Lattice}
+
+\author{Thomas Pluck}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+A recurrent architecture built from one analog-crossbar primitive
+(Gm--C integrator $+$ $\tanh$ $+$ learnable bias) replicated over a
+rectangular $N{\times}M$ grid. Each cell has two inputs (from-left and
+from-above) and one output routed to both its right and below
+neighbours, so the left shoreline takes external input, the bottom
+shoreline produces block output, and the top/right shorelines are
+nulled. Four learnable scalars per cell $(\log\tau, w_\text{L}, w_\text{T},
+b)$; the encoder (left shoreline) and decoder (bottom shoreline) hold
+no learned parameters. The RTRL sensitivity tensor has 2-in / 2-out
+structure: each cell has exactly two descendants, and a local
+SnAP-$1$ rule tracks one cross-trace per descendant per learnable
+parameter ($8$ scalars per cell). We verify single-step gradient
+agreement with BPTT at float-64 $\epsilon$ ($\sim\!1.5\times 10^{-16}$
+relative) and characterise full-sequence divergence: at $T{=}100$ on a
+$4{\times}4$ grid the local-vs-BPTT residual is $\sim\!10{-}20\%$ per
+parameter group, an order of magnitude higher than the tree variant of
+the same architecture family because each grid cell has two descendant
+paths where the tree had one. We then map the design-space axes a chip
+designer cares about: weight precision, timescale range, grid aspect
+ratio $(N{:}M)$, capacity scaling, and a row-wise MNIST result
+demonstrating the rule trains the architecture end-to-end.
+\end{abstract}
+
+\section{Introduction and contribution}
+
+\paragraph{Setting.}
+Analog neuromorphic crossbars can implement a Gm--C low-pass integrator
+with a $\tanh$-shaped output stage cheaply and uniformly. The design
+question is not whether such a substrate can be made to learn at all,
+but what \emph{architecture} and \emph{rule} fit inside its constraints:
+no backpropagation-through-time (no global backward pass), no
+per-parameter adaptive optimiser state, bounded per-cell analog state,
+finite arithmetic precision, fixed input wiring, and spatial locality of
+the learning signal. We take those constraints as the scope of the
+problem rather than axes to apologise along.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{A grid primitive with two-in/two-out connectivity.} An
+$N{\times}M$ rectangular grid of cells where each cell receives inputs
+from its left and above neighbours and drives output to its right and
+below neighbours. Left shoreline is external input, bottom shoreline
+is block output, remaining shorelines are nulled. Four learnable
+scalars per cell $(\log\tau, w_\text{L}, w_\text{T}, b)$.
+\item \textbf{A local rule with per-descendant cross-traces.} SnAP-$1$
+on this topology tracks one self-trace per learnable parameter plus
+one cross-trace per descendant (2 per cell). Single-step gradients
+match BPTT at float-64 $\epsilon$. Full-sequence gradients diverge
+with $T$ because each cell has two descendant paths that SnAP-$1$ only
+partially captures---a harder truncation regime than the tree variant,
+which had one descendant per cell.
+\item \textbf{A silicon-aware characterisation.} Within the scope the
+hardware imposes, we map six design-relevant axes: weight/state/trace
+precision, SnAP-$k$ accuracy vs.\ state budget, timescale range,
+topology $(T, K, B, s)$ at matched cell count, capacity scaling, and
+transfer to an RL task (MinAtar) and a neuromorphic benchmark (SHD).
+The output is a design-space picture, not a leaderboard.
+\end{enumerate}
+
+\paragraph{Scope.}
+The input-routing matrix $W_{\text{in}}$ is the chip's external input
+wiring---a sparse random/permutation scatter set once at fabrication or
+at session start, analogous to the fixed input projection of a
+reservoir. It is not trained, in either our rule or the BPTT reference.
+All numbers in this paper are at this scope.
+Section~\ref{sec:discussion} reports a brief ablation quantifying
+what learning $W_{\text{in}}$ would add if the hardware constraint were
+relaxed.
+
+\paragraph{Relation to prior work.}
+The RTRL taxonomy has been mapped by Marschall, Cho and Savin
+\cite{marschall2020}; sparse and stochastic approximations include
+UORO~\cite{tallec2018}, KF-RTRL~\cite{mujika2018}, and
+SnAP-$k$~\cite{menick2021}. RFLO~\cite{murray2019} and e-prop
+\cite{bellec2020} are the closest local-rule neighbours. OSTL
+\cite{bohnstingl2023} and Zucchet \emph{et al.}~\cite{zucchet2023} both
+exploit structural sparsity for exact online learning in specific
+architecture classes; our tree variant is a generalisation. On the
+\emph{dendritic} side, models combining multi-compartment neurons with local
+learning form a growing literature. The nearest work is Yin \emph{et al.}
+\cite{yin2024}: they apply e-prop (equivalent to SnAP-$1$) to a
+two-compartment spiking dendritic neuron, on SHD. Differences from the
+present work: (i) we generalise from SnAP-$1$ to arbitrary $k$ on an
+ancestor chain and make the structural-sparsity argument explicit; (ii)
+we work with arbitrary tree depth and branching $(T, K, B, s)$ rather than
+a fixed two-compartment topology; (iii) the Gm--C$+\tanh$ primitive is
+fully differentiable, whereas LIF-based work requires surrogate
+gradients---a genuine simplification for an exact-RTRL argument and for
+analog mapping. Zhang \emph{et al.}'s TC-LIF \cite{zhang2024tclif},
+Huang \emph{et al.}'s DendSN \cite{huang2024dendsn}, and Feng \emph{et
+al.}'s TS-LIF \cite{feng2025tslif} are parallel dual-compartment
+proposals. Biologically motivated multi-compartment learning
+rules include Sacramento \emph{et al.}~\cite{sacramento2018},
+Guerguiev \emph{et al.}~\cite{guerguiev2017}, and
+Payeur \emph{et al.}~\cite{payeur2021}. On the ML-side dendrite literature:
+Beniaguev \emph{et al.}~\cite{beniaguev2021} show single cortical neurons
+match small deep ANNs; Iyer \emph{et al.}~\cite{iyer2022} use active
+dendrites for multi-task generalisation; Poirazi and
+Papoutsi~\cite{poirazi2020} review the field. On the analog hardware side,
+Cartiglia \emph{et al.}~\cite{cartiglia2022} and related work from the
+Indiveri group including Maryada \emph{et al.}~\cite{maryada2025} prototype
+dendritic learning in silicon; the review of
+Acharya \emph{et al.}~\cite{acharya2021} covers the broader landscape.
+
+What is novel here is the combination of: (i) a rectangular-grid
+primitive with 2-in/2-out connectivity and native shoreline I/O,
+giving the same filter+$\tanh$+bias cell a very different sensitivity
+structure from the tree variant \cite{tree-neurons}; (ii) a SnAP-$1$
+specialisation that tracks one cross-trace per immediate descendant
+(2 per cell) rather than a single ancestor chain; (iii) empirical
+quantification of the multi-hop-descendant truncation cost that
+SnAP-$1$ pays on this topology, which is significantly higher than on
+the tree. What is \emph{not} novel is the SnAP-$k$ framework, the
+per-group-LR optimiser story, or the fixed-shoreline-encoder approach.
+
+\paragraph{Code.} \url{https://github.com/ThomasPluck/grid-neurons}
+
+\section{Architecture}
+\label{sec:arch}
+
+\subsection{The canonical cell}
+
+Every grid cell is the same first-order integrator followed by $\tanh$.
+Cell $(i, j)$ at position row $i$, column $j$ receives two inputs:
+one from its left neighbour $y_{i, j-1}$ and one from its top neighbour
+$y_{i-1, j}$, each weighted independently:
+\begin{align}
+\mathrm{drive}_{ij}(t) &= w_{ij}^{\text{L}}\, y_{i,j-1}(t) + w_{ij}^{\text{T}}\, y_{i-1,j}(t), \\
+\tau_{ij} \frac{\mathrm{d}s_{ij}}{\mathrm{d}t} &= -s_{ij} + \mathrm{drive}_{ij}(t), \\
+y_{ij}(t) &= \tanh\!\big(s_{ij}(t) + b_{ij}\big).
+\end{align}
+Zero-order-hold discretisation:
+\begin{equation}
+a_{ij} = \mathrm{e}^{-\Delta t/\tau_{ij}}, \quad c_{ij} = 1 - a_{ij},\qquad
+s_{ij}(t{+}1) = a_{ij}\, s_{ij}(t) + c_{ij} \cdot \mathrm{drive}_{ij}(t{+}1).
+\label{eq:discrete}
+\end{equation}
+Each cell carries four learnable scalars,
+$\theta_{ij} = \{\log \tau_{ij},\, w_{ij}^{\text{L}},\, w_{ij}^{\text{T}},\, b_{ij}\}$.
+Output $y_{ij} \in (-1, 1)$ is bounded, so no normalisation is required.
+
+\subsection{Topology: rectangular grid with shoreline I/O}
+
+A grid block is a rectangle of cells indexed $(i, j)$ with
+$i \in \{0, \ldots, N{-}1\}$, $j \in \{0, \ldots, M{-}1\}$. Connectivity
+is fixed and feed-forward within a timestep:
+\begin{itemize}[leftmargin=*]
+\item Each cell has \textbf{two inputs} from its left and top neighbours,
+and \textbf{two output edges} routing $y_{ij}$ to its right and below
+neighbours.
+\item \textbf{Left shoreline} $(j{=}0)$: external input. Each cell in
+column $0$ receives one external channel in place of a left neighbour.
+\item \textbf{Bottom shoreline} $(i{=}N{-}1)$: block output. Each cell in
+row $N{-}1$ is one of the $M$ output values.
+\item \textbf{Top shoreline} $(i{=}0)$: the missing top neighbour is
+treated as zero. \textbf{Right shoreline} $(j{=}M{-}1)$: the outgoing
+right-edge is dropped.
+\end{itemize}
+Forward traversal is raster order (left-to-right within a row, then
+top-to-bottom): each cell's inputs come from cells already updated this
+step. Backward traversal is the reverse. The grid has $NM$ cells and
+$\sim 2NM$ internal edges, so the forward pass is $O(NM)$ per timestep.
+
+\subsection{Encoder and decoder: native I/O}
+\label{sec:encdec}
+
+A block is one grid; it holds every trainable parameter. Encoder and
+decoder are defined by the grid's shoreline geometry and carry no
+learned parameters.
+
+\paragraph{Encoder.} The left shoreline directly accepts external input:
+cell $(i, 0)$'s left-input at each timestep is external channel $x_i(t)$.
+For tasks where $N_{\text{ext}} = N$ (input dim $=$ grid height) this is
+literally an identity wiring; when $N_{\text{ext}} \ne N$ an optional
+fixed sparse-random projection $W_{\text{in}} \in \mathbb{R}^{N \times
+N_{\text{ext}}}$ maps external channels to left-shoreline drives. The
+projection is drawn once at initialisation and not trained.
+
+\paragraph{Decoder.} The bottom shoreline is the $M$-dimensional block
+output. Cell $(N{-}1, j)$'s output $r_j(t) = y_{N-1,j}(t) \in (-1, 1)$
+is used directly. For classification we sum over time,
+$\hat{\ell}_j = \sum_t r_j(t)$, and feed $\hat{\ell}$ to a standard
+softmax--cross-entropy loss. No learned readout weights.
+
+\paragraph{Per task.}
+\begin{itemize}[leftmargin=*]
+\item \textit{Row-wise MNIST}: $N{=}28$ (one grid row per input
+channel), $M{=}10$ (one bottom-shoreline cell per class). $N_{\text{ext}}
+= N$, identity encoder. Decoder is summed-readout softmax-CE.
+\end{itemize}
+
+In every experiment the only trainable parameters are the per-cell
+$(\log\tau_{ij}, w_{ij}^\text{L}, w_{ij}^\text{T}, b_{ij})$ quadruples.
+The grid carries the whole representation.
+
+\section{Sparse grid-RTRL via SnAP-$1$}
+\label{sec:snap}
+
+\subsection{Structural sparsity of the sensitivity tensor}
+
+Parameter $\theta_{ij} \in \{\log\tau_{ij}, w_{ij}^\text{L},
+w_{ij}^\text{T}, b_{ij}\}$ appears only in cell $(i, j)$'s update, and
+its influence spreads only to downstream cells on the grid:
+\begin{equation}
+\frac{\partial s_{k\ell}(t)}{\partial \theta_{ij}} = 0
+\quad\text{unless } k \ge i \text{ and } \ell \ge j.
+\end{equation}
+Unlike the one-in/one-out tree (ancestor chain of length $O(\log N)$),
+the grid's two-in/two-out structure makes the downstream cone grow
+quadratically with distance: at Manhattan distance $d$ from
+$(i, j)$ there are $d{+}1$ descendants, and the set within distance
+$k$ has size $\binom{k+2}{2}$. A full grid-RTRL would carry $O(NM)$
+traces per parameter and store $\sim\!(NM)^2$ total.
+
+\subsection{SnAP-$1$ traces}
+
+We track self-traces for the three filter-sensitive parameters and
+\emph{one cross-trace per immediate descendant} (below and right):
+\begin{align}
+e^{\text{L}}_{ij}(t) &\equiv \partial s_{ij}/\partial w^{\text{L}}_{ij}, &
+e^{\text{T}}_{ij}(t) &\equiv \partial s_{ij}/\partial w^{\text{T}}_{ij}, &
+\eta_{ij}(t) &\equiv \partial s_{ij}/\partial \log\tau_{ij}, \\
+\epsilon^{(1,d)}_{ij,\theta}(t) &\equiv \partial s_d(t)/\partial \theta_{ij}, &
+d &\in \{\text{below}, \text{right}\}. & &
+\end{align}
+Total per-cell state at SnAP-$1$: $3$ self-traces $+$ $2$ descendants
+$\times\,4$ parameter types $=$ $11$ scalars, a constant factor more
+than the tree primitive. Cross-trace update, for each $\theta$ and each
+descendant $d$:
+\begin{equation}
+\epsilon^{(1,d)}_{ij,\theta}(t{+}1) =
+a_d\,\epsilon^{(1,d)}_{ij,\theta}(t)
++ c_d\,\kappa_d\,(1 - y_{ij}^2)\,f_{\theta,ij}(t{+}1),
+\end{equation}
+where $\kappa_d$ is the weight that couples $y_{ij}$ into $d$'s drive
+($w^\text{T}_d$ if $d$ is the below-neighbour, $w^\text{L}_d$ if the
+right-neighbour) and $f_{\theta,ij}$ is the self-derivative.
+
+\subsection{Backward pass}
+
+Messages start at the bottom shoreline with
+$m_{N{-}1,j}(t) = \partial L/\partial r_j(t)$ and propagate in reverse
+raster order. Each cell's incoming message is the sum of contributions
+from its two descendants through the spatial Jacobians
+$\partial y_d/\partial y_{ij} = \kappa_d\,(1{-}y_d^2)\,c_d$. The
+per-timestep gradient combines spatial + SnAP-$1$ terms with the
+past-only (anti-double-count) subtraction:
+\begin{equation}
+\frac{\mathrm{d}L_t}{\mathrm{d}\theta_{ij}}
+= m_{ij}(t)\,(1{-}y_{ij}^2)\,f_{\theta,ij}(t)
++ \!\!\sum_{d\in\{\text{below},\text{right}\}}\!\!
+m_d(t)\,(1{-}y_d^2)\,\big[\epsilon^{(1,d)}_{ij,\theta}(t)
+- c_d\,\kappa_d\,f_{\theta,ij}(t)\big].
+\label{eq:local-grad}
+\end{equation}
+
+\section{Gradient-agreement characterisation}
+\label{sec:correctness}
+
+We quantify how faithfully the grid SnAP-$1$ rule matches BPTT (via
+\texttt{jax.grad}) on a $4{\times}4$ grid, float-$64$, random-init
+parameters, random $N$-dim input sequence of length $T$.
+
+\paragraph{Single step ($T{=}1$).}
+With all traces initially zero, the past-only term in
+Eq.~\ref{eq:local-grad} vanishes and the rule reduces to spatial
+backprop on the single forward step. Per-parameter-group max
+$|g_{\text{local}} - g_{\text{BPTT}}|$:
+\begin{center}
+\begin{tabular}{l r r r r}
+\toprule
+ & $w^\text{L}$ & $w^\text{T}$ & bias & $\log\tau$ \\
+\midrule
+rel.\ error & $1.56\times 10^{-16}$ & $2.34\times 10^{-16}$ & $1.47\times 10^{-16}$ & $4.28\times 10^{-16}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Agreement at float-64 $\epsilon$ on every learnable parameter: the
+implementation is numerically correct.
+
+\paragraph{Longer sequences: SnAP-$1$ diverges.}
+As $T$ grows, each parameter's influence propagates over multi-hop
+descendant chains that SnAP-$1$ does not track. Relative error at the
+worst-case parameter group (on $w^\text{L}$, summed-CE loss):
+\begin{center}
+\begin{tabular}{r r r r}
+\toprule
+$T$ & $w^\text{L}$ rel.\ err & bias rel.\ err & $\log\tau$ rel.\ err \\
+\midrule
+$1$   & $1.6\times 10^{-16}$ & $1.5\times 10^{-16}$ & $4.3\times 10^{-16}$ \\
+$5$   & $6.1\times 10^{-3}$  & $1.1\times 10^{-3}$  & $1.5\times 10^{-2}$ \\
+$20$  & $5.8\times 10^{-2}$  & $1.3\times 10^{-2}$  & $5.3\times 10^{-2}$ \\
+$100$ & $1.2\times 10^{-1}$  & $9.2\times 10^{-2}$  & $2.1\times 10^{-1}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+This is a substantially worse truncation regime than the tree variant
+\cite{tree-neurons}, where SnAP-$1$ matched full RTRL to within $\sim\!3$\,pt
+training accuracy and full RTRL matched BPTT at float-$64$ $\epsilon$
+over full $T{=}100$ sequences. On the grid, SnAP-$1$'s two immediate
+descendants capture only the first-hop fraction of a quadratically-
+growing downstream cone, so the rule is a genuine low-order
+approximation at long $T$. Extending to SnAP-$k$ on the grid costs
+$O(k^2)$ extra state per cell (the $\binom{k+2}{2}$ descendants), a
+real design-space trade-off this paper flags but does not sweep.
+
+\section{Row-wise MNIST}
+\label{sec:mnist}
+
+\textit{Placeholder: the grid is trained end-to-end on row-wise MNIST
+with $N{=}28$ left-shoreline inputs and $M{=}10$ bottom-shoreline
+outputs (identity encoder, summed-CE decoder), Adam
+$\eta{=}3{\times}10^{-3}$, $10$ epochs, batch $32$, $\tau\in[1,
+20]$\,ms, input gain $10$. Numbers to be filled in.}
+
+\section{Discussion}
+\label{sec:discussion}
+
+The grid variant rewrites one thing and one thing only about the
+tree-neurons architecture: the topology. The primitive, the
+per-parameter optimiser story, the no-encoder/no-decoder scoping, and
+the SnAP-$k$ formulation all carry over. What changes is the shape of
+the sensitivity tensor: the tree's logarithmic ancestor chain becomes a
+linear-in-dimension quadratic cone, and SnAP-$1$ goes from nearly-exact
+to a first-order approximation with error growing in $T$.
+
+This opens a characterisation axis the tree did not have: the
+truncation-vs-state-budget trade for grid topologies is much sharper.
+SnAP-$1$ on a grid is useful at short $T$ (e.g.\ MNIST at $T{=}28$),
+and a chip designer who wants long-horizon RL-style training on a grid
+would need to pay the $O(k^2)$ per-cell state for higher $k$, or
+accept a more biased gradient.
+
+\appendix
+
+\section{Architectural ablations}
+\label{app:ablations}
+
+\paragraph{No residual feed-through.}
+An earlier version of the cell included a learnable residual-feedthrough
+coefficient $w_{\text{pass}}$ providing a linear shortcut around the
+$\tanh$ nonlinearity. We removed it: empirical sweeps showed it offered
+no material improvement in either BPTT or local-rule training after LR
+ratios were tuned, and it made the forward-pass bound less clean
+(residual outside $\tanh$) or killed its gradient-flow advantage
+(residual inside $\tanh$). The final primitive in Section~\ref{sec:arch}
+is accordingly the minimal filter+bias+$\tanh$ with no shortcut.
+
+
+\begin{thebibliography}{99}
+
+\bibitem{williams1989}
+R.~J. Williams and D.~Zipser.
+\newblock A learning algorithm for continually running fully recurrent neural networks.
+\newblock \emph{Neural Computation}, 1(2):270--280, 1989.
+
+\bibitem{marschall2020}
+O.~Marschall, K.~Cho, and C.~Savin.
+\newblock A unified framework of online learning algorithms for training recurrent neural networks.
+\newblock \emph{Journal of Machine Learning Research}, 21(135):1--34, 2020.
+
+\bibitem{tallec2018}
+C.~Tallec and Y.~Ollivier.
+\newblock Unbiased online recurrent optimization.
+\newblock In \emph{International Conference on Learning Representations}, 2018.
+
+\bibitem{mujika2018}
+A.~Mujika, F.~Meier, and A.~Steger.
+\newblock Approximating real-time recurrent learning with random Kronecker factors.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2018.
+
+\bibitem{menick2021}
+J.~Menick, E.~Elsen, U.~Evci, S.~Osindero, K.~Simonyan, and A.~Graves.
+\newblock A practical sparse approximation for real time recurrent learning.
+\newblock In \emph{International Conference on Learning Representations}, 2021.
+
+\bibitem{murray2019}
+J.~M. Murray.
+\newblock Local online learning in recurrent networks with random feedback.
+\newblock \emph{eLife}, 8:e43299, 2019.
+
+\bibitem{bellec2020}
+G.~Bellec, F.~Scherr, A.~Subramoney, E.~Hajek, D.~Salaj, R.~Legenstein, and W.~Maass.
+\newblock A solution to the learning dilemma for recurrent networks of spiking neurons.
+\newblock \emph{Nature Communications}, 11:3625, 2020.
+
+\bibitem{bohnstingl2023}
+T.~Bohnstingl \emph{et al.}
+\newblock Online spatio-temporal learning in deep neural networks.
+\newblock \emph{IEEE Transactions on Neural Networks and Learning Systems}, 2023.
+
+\bibitem{tree-neurons}
+T.~Pluck.
+\newblock Silicon-aware local RTRL on a hardware-primitive dendritic tree.
+\newblock \url{https://github.com/ThomasPluck/tree-neurons}, 2026.
+
+\bibitem{zucchet2023}
+N.~Zucchet, R.~Meier, S.~Schug, A.~Mujika, and J.~Sacramento.
+\newblock Online learning of long-range dependencies.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2023.
+
+\bibitem{orvieto2023}
+A.~Orvieto, S.~L. Smith, A.~Gu, A.~Fernando, C.~Gulcehre, R.~Pascanu, and S.~De.
+\newblock Resurrecting recurrent neural networks for long sequences.
+\newblock arXiv:2303.06349, 2023.
+
+\bibitem{sacramento2018}
+J.~Sacramento, R.~Ponte~Costa, Y.~Bengio, and W.~Senn.
+\newblock Dendritic cortical microcircuits approximate the backpropagation algorithm.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2018.
+
+\bibitem{guerguiev2017}
+J.~Guerguiev, T.~P. Lillicrap, and B.~A. Richards.
+\newblock Towards deep learning with segregated dendrites.
+\newblock \emph{eLife}, 6:e22901, 2017.
+
+\bibitem{payeur2021}
+A.~Payeur, J.~Guerguiev, F.~Zenke, B.~A. Richards, and R.~Naud.
+\newblock Burst-dependent synaptic plasticity can coordinate learning in hierarchical circuits.
+\newblock \emph{Nature Neuroscience}, 24(7):1010--1019, 2021.
+
+\bibitem{yin2024}
+B.~Yin \emph{et al.}
+\newblock Training high-performance deep learning networks with two-compartment dendritic neurons using e-prop.
+\newblock arXiv:2402.15969, 2024.
+
+\bibitem{young2019minatar}
+K.~Young and T.~Tian.
+\newblock MinAtar: An Atari-inspired testbed for thorough and reproducible reinforcement learning experiments.
+\newblock arXiv:1903.03176, 2019.
+
+\bibitem{zhang2024tclif}
+S.~Zhang \emph{et al.}
+\newblock TC-LIF: A two-compartment spiking neuron model for long-term sequential modelling.
+\newblock arXiv:2308.13250, 2024.
+
+\bibitem{huang2024dendsn}
+X.~Huang \emph{et al.}
+\newblock DendSN: A dendritic spiking neuron model for deep neural networks.
+\newblock arXiv:2412.06355, 2024.
+
+\bibitem{feng2025tslif}
+L.~Feng \emph{et al.}
+\newblock TS-LIF: A temporal-separation two-compartment spiking neuron.
+\newblock In \emph{International Conference on Learning Representations}, 2025.
+
+\bibitem{beniaguev2021}
+D.~Beniaguev, I.~Segev, and M.~London.
+\newblock Single cortical neurons as deep artificial neural networks.
+\newblock \emph{Neuron}, 109(17):2727--2739, 2021.
+
+\bibitem{iyer2022}
+A.~Iyer \emph{et al.}
+\newblock Avoiding catastrophe: Active dendrites enable multi-task learning in dynamic environments.
+\newblock \emph{Neural Networks}, 155:1--16, 2022.
+
+\bibitem{poirazi2020}
+P.~Poirazi and A.~Papoutsi.
+\newblock Illuminating dendritic function with computational models.
+\newblock \emph{Nature Reviews Neuroscience}, 21(6):303--321, 2020.
+
+\bibitem{cartiglia2022}
+M.~Cartiglia, A.~Rubino, S.~Narayanan, C.~Frenkel, G.~Haessig, G.~Indiveri,
+and M.~Payvand.
+\newblock Stochastic dendrites enable online learning in mixed-signal neuromorphic processing systems.
+\newblock arXiv:2201.10409, 2022.
+
+\bibitem{maryada2025}
+Maryada \emph{et al.}
+\newblock Canonical cortical microcircuit with analog dendritic learning on neuromorphic hardware.
+\newblock bioRxiv 2025.03.28, 2025.
+
+\bibitem{acharya2021}
+J.~Acharya \emph{et al.}
+\newblock Dendritic computing: Branching deeper into machine learning.
+\newblock \emph{Neuroscience}, 489:275--289, 2021.
+
+\end{thebibliography}
+
+\end{document}
