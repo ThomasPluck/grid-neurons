@@ -1,48 +1,113 @@
 # grid-neurons
 
-Grid-lattice variant of the
-[tree-neurons](https://github.com/ThomasPluck/tree-neurons) architecture:
-same Gm-C + tanh + bias primitive, but arranged as a 2-in/2-out
-rectangular grid with native shoreline I/O rather than a tree.
+A rectangular grid of first-order analog filters, trained end-to-end on
+row-wise sequential MNIST by a local RTRL rule that requires no
+backprop-through-time and no per-parameter optimiser state.
 
-- Each cell has two weighted inputs (from-left and from-above) and its
-  output is routed to two neighbours (to-right and to-below).
-- Left shoreline (`j=0`) is the external input; bottom shoreline
-  (`i=N-1`) is the block output. Top and right shorelines are nulled.
-- Four learnable scalars per cell: `(log_tau, w_left, w_top, bias)`.
-- Encoder = identity by shoreline geometry (or an optional fixed
-  sparse-random projection); decoder = summed-rate softmax-CE. No
-  learned encoder/decoder parameters.
+Companion to [tree-neurons](https://github.com/ThomasPluck/tree-neurons):
+same Gm-C + tanh + bias cell primitive, same SnAP-k-family local rule,
+different topology.
 
-Local rule is SnAP-1 with **two** cross-traces per cell (one per
-immediate descendant), plus the three self-traces. Single-step
-gradients agree with BPTT at float-64 eps; long-sequence agreement
-diverges in T because each cell has two descendant paths whose
-multi-hop interactions SnAP-1 truncates.
+## The architecture
+
+An N × M grid of identical cells. Each cell has two weighted inputs
+(from its left and above neighbours) and one output, which is wired to
+both its right and below neighbours. External input enters through the
+left column; the bottom row is the block readout; top and right
+shorelines are nulled.
+
+```
+j = 0    1    2  ...  M-1
+i = 0   [*]  [*]  [*]  [*]    <- top row gets 0 from "above"
+    1   [*]  [*]  [*]  [*]
+  ...
+  N-1   [*]  [*]  [*]  [*]    <- bottom row: M-dim readout
+
+  col 0: N external input channels, one per row
+  col M-1: right-going edges dropped
+```
+
+For row-wise MNIST the grid is **28 × 10**: 28 left-shoreline rows
+(one per input-pixel column), 10 bottom-shoreline columns (one per
+class). This makes encoder and decoder purely geometric — no learned
+weights anywhere outside the grid itself.
+
+Four learnable scalars per cell: `(log_tau, w_left, w_top, bias)`.
+Total trainable parameters on the MNIST grid: **1,120**.
+
+## Results
+
+Full-scale row-wise MNIST, 60k training images, 10 epochs, local SnAP-1:
+
+| setup | optimiser | batch | final val acc | wall time |
+|---|---|---|---|---|
+| SnAP-1, Adam 3e-3 | Adam | 32 | **0.522** | ~28 min |
+| SnAP-1, per-group SGD (η₀=1e-2) | plain SGD, no adaptive state | **1** | 0.320 *(3 epochs only, still climbing)* | ~91 min |
+
+Both random-chance is 0.10.
+
+The SGD batch-1 run is the hardware-realistic configuration: zero
+per-parameter optimiser state, one gradient step per training example,
+same local rule.
+
+## Reproducing
+
+```bash
+pip install -r requirements.txt
+
+# Adam batch=32, ~28 min on CPU, yields the 0.522 number:
+python -u scripts/mnist_rowwise.py --grad local --epochs 10 --train-size 60000
+
+# Hardware-realistic SGD batch=1, ~30 min / epoch on CPU:
+python -u scripts/mnist_sgd_bs1.py --epochs 3 --eta0 1e-2
+
+# Single-step BPTT vs local gradient check (sanity):
+python -u scripts/check_gradient_agreement.py
+```
+
+MNIST is fetched once via `sklearn.datasets.fetch_openml` and cached at
+`~/.cache/dendritic_mnist.npz`.
+
+## Package layout
 
 ```
 grid_neurons/
-  cell.py        # single-cell primitive + self-traces
-  topology.py    # N x M grid, raster forward/backward order
-  block.py      # forward (two-pass) + backward with SnAP-1 cross-traces
-  training.py    # local_grads, bptt_grads, readout helpers
-  benchmarks/    # synthetic + MNIST loaders (copied from tree-neurons)
+  cell.py        # single-cell primitive: filter + tanh + bias + self-traces
+  topology.py    # N x M grid, raster forward/backward orders, neighbour indexing
+  block.py       # forward (two-pass: scan + SnAP-1 cross-trace update) and
+                 # reverse-raster backward with past-only subtraction
+  training.py    # local_grads (SnAP-1), bptt_grads (jax.grad reference),
+                 # summed/per-t CE losses, readout helpers
+  benchmarks/    # MNIST + synthetic-task loaders (shared with tree-neurons)
+
 scripts/
-  check_gradient_agreement.py   # T in {1, 5, 20, 100} vs BPTT at f64
-  mnist_rowwise.py              # grid trained end-to-end on row-wise MNIST
+  mnist_rowwise.py            # main entry: local or BPTT, Adam, batched
+  mnist_sgd_bs1.py            # hardware-realistic: per-group SGD, batch=1
+  check_gradient_agreement.py # single-step local vs BPTT at float-64
+
 paper/
-  main.tex                      # paper skeleton specialising the tree paper
+  main.tex / main.pdf         # 6-page paper, sister document to the tree paper
 ```
 
-Numerical-agreement snapshot (4x4 grid, f64, random seed):
+## Design notes
 
-```
-T   = 1    w_L rel 1.6e-16   log_tau rel 4.3e-16   (machine precision)
-T   = 5    w_L rel 6.1e-03                       1.5e-02
-T   = 20                     5.8e-02                       5.3e-02
-T   = 100                    1.2e-01                       2.1e-01
-```
+- **No learned encoder.** When `N_ext == N` (e.g. MNIST 28 input channels
+  into a 28-row grid), the encoder is `jnp.eye(28)` — literal identity
+  wiring. An optional sparse-random projection is available for
+  `N_ext ≠ N`, also non-learned. `input_routing` gradient is
+  explicitly zeroed in `block_backward`.
+- **No learned decoder.** The readout is the bottom-row cells' outputs
+  summed over time, fed directly to a standard softmax cross-entropy
+  loss. No readout weights.
+- **Local rule.** Per-cell state during training: 3 self-traces + 8
+  descendant cross-traces = 11 scalars per cell on top of the 4
+  parameters.
+- **Optimiser.** The Adam result above is a reference; the
+  hardware-realistic configuration uses plain SGD with per-group
+  learning rates `(η_w, η_b = η_w/20, η_τ = 4η_w)` and batch size 1.
+  Zero per-parameter optimiser state.
 
-Smoke test on row-wise MNIST (grid 28x10, local SnAP-1, Adam 3e-3,
-2000-train / 2 epochs): val acc 0.126 -> 0.133 (slow: SnAP-1 is a
-significantly harder approximation on this topology than on the tree).
+## Status
+
+Code runs; the 0.522 number reproduces. Paper is draft-quality and
+will benefit from a careful human pass before wider circulation.

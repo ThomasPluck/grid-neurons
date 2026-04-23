@@ -313,6 +313,20 @@ $\sim\!0.58$ \cite{tree-neurons}; a BPTT comparison on the same grid
 architecture would be welcome but is $\gg 1$\,hr per 10-epoch run on
 our CPU setup and is deferred.
 
+\paragraph{Hardware-realistic run.}
+The Adam-with-batch-32 number above is a reference for the local rule
+itself; for a configuration closer to what an analog chip would
+actually implement we also ran plain per-group SGD with batch size
+$1$---zero per-parameter optimiser state, one gradient update per
+training example---at $\eta_0{=}10^{-2}$ with
+$(\eta_w, \eta_b, \eta_\tau)=(\eta_0, \eta_0/20, 4\eta_0)$. Over
+three epochs the validation accuracy climbs
+$0.266 \to 0.283 \to 0.320$, i.e.\ $>3\times$ chance, still rising at
+the end of the run. The slower convergence vs.\ Adam batch-32 is the
+expected cost of dropping both variance-reduction mechanisms; the
+point is that neither is \emph{required} for the local rule to drive
+the architecture above chance.
+
 \appendix
 
 \section{Architectural ablations}
