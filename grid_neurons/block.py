@@ -20,6 +20,12 @@ shoreline is a one-per-row direct external input, so for standard runs
 the block doesn't need a routing matrix. We expose an optional
 input_routing of shape (N, N_ext) so sparse random encoders can be
 applied; the encoder is fixed at init (not learned).
+
+Measurement-robustness perturbations: the optional ``Perturbation`` knobs
+plug into the *learning path only* (forward second pass + backward).
+Forward dynamics (s, y, drive) are unchanged; only the SnAP-1 cross-trace
+update and the SnAP-1 backward bracket pick up perturbations. See
+``Perturbation`` for the meanings of each scalar.
 """
 from typing import NamedTuple
 
@@ -28,6 +34,49 @@ import jax.numpy as jnp
 
 from .cell import CellParams, CellState, cell_step
 from .topology import GridTopology, num_cells
+
+
+class Perturbation(NamedTuple):
+    """Knobs for the measurement-noise / -bias robustness study.
+
+    All zeros / ones below = no perturbation (use ``no_perturbation()``).
+
+      delta_leak     : 1a. Cross-trace retention coefficient becomes
+                       ``a_d * (1 - delta_leak)`` (cap leakier than nominal).
+      msg_gain_pos   : 1b. Backward message ``m`` is multiplied by this
+                       when m > 0.
+      msg_gain_neg   : 1b. Backward message ``m`` is multiplied by this
+                       when m < 0.
+                       (Symmetric gain: msg_gain_pos = msg_gain_neg = 1-delta.)
+      delta_sub      : 1c. The eps-cross term in the SnAP-1 backward bracket
+                       becomes ``(1 + delta_sub) * eps^(1,d)`` while the
+                       current-step ``c_d * kappa_d * f`` is kept at unit gain.
+                       Models incomplete cancellation of the past-only
+                       subtraction.
+      sigma_eps_rel  : 2a. Zero-mean Gaussian noise added to each cross-trace
+                       after each update step, std = sigma_eps_rel * RMS(eps)
+                       computed per-parameter-type, per-step.
+      sigma_msg_rel  : 2b. Zero-mean Gaussian noise added to the backward
+                       message read at each cell, std = sigma_msg_rel *
+                       RMS(dL/d_rate) computed once at the start of the
+                       backward pass.
+    """
+    delta_leak: jnp.ndarray
+    msg_gain_pos: jnp.ndarray
+    msg_gain_neg: jnp.ndarray
+    delta_sub: jnp.ndarray
+    sigma_eps_rel: jnp.ndarray
+    sigma_msg_rel: jnp.ndarray
+
+
+def no_perturbation() -> Perturbation:
+    """Identity / no-op perturbation: leak=0, gains=1, sub=0, sigmas=0."""
+    z = jnp.asarray(0.0, dtype=jnp.float32)
+    o = jnp.asarray(1.0, dtype=jnp.float32)
+    return Perturbation(
+        delta_leak=z, msg_gain_pos=o, msg_gain_neg=o,
+        delta_sub=z, sigma_eps_rel=z, sigma_msg_rel=z,
+    )
 
 
 class BlockParams(NamedTuple):
@@ -98,6 +147,8 @@ def block_forward(
     inputs_ext: jnp.ndarray,       # (N_ext,)
     topology: GridTopology,
     dt: float,
+    perturbation: Perturbation | None = None,
+    key: jnp.ndarray | None = None,
 ) -> tuple[BlockState, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Returns (new_state, rates_out, y_all, drives_all).
 
@@ -106,6 +157,11 @@ def block_forward(
     drives_all:  (N*M,) input-sum drives seen by each cell this step
                  (kept for backward). drive_ij = w_L*y_left + w_T*y_top.
     """
+    if perturbation is None:
+        perturbation = no_perturbation()
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
     n = num_cells(topology)
     N, M = topology.N, topology.M
     left_drives = route_inputs(params.input_routing, inputs_ext)  # (N,)
@@ -199,13 +255,18 @@ def block_forward(
     dy_db  = omy2
     dy_dlt = omy2 * eta_all * tau_all
 
+    # 1a (trace leak bias): a_d -> a_d * (1 - delta_leak) for cross-traces only.
+    leak_factor = 1.0 - perturbation.delta_leak
+    a_below_pert = a_below * leak_factor
+    a_right_pert = a_right * leak_factor
+
     # Update cross-traces, masked by has_below/has_right.
     def update(old_below, old_right, dy):
         upd_b = jnp.where(has_below,
-                          a_below * old_below + c_below * w_T_below * dy,
+                          a_below_pert * old_below + c_below * w_T_below * dy,
                           old_below)
         upd_r = jnp.where(has_right,
-                          a_right * old_right + c_right * w_L_right * dy,
+                          a_right_pert * old_right + c_right * w_L_right * dy,
                           old_right)
         return jnp.stack([upd_b, upd_r], axis=-1)
 
@@ -213,6 +274,21 @@ def block_forward(
     new_e_desc_w_T = update(e_desc_w_T[:, 0], e_desc_w_T[:, 1], dy_dT)
     new_e_desc_b   = update(e_desc_b[:, 0],   e_desc_b[:, 1],   dy_db)
     new_e_desc_tau = update(e_desc_tau[:, 0], e_desc_tau[:, 1], dy_dlt)
+
+    # 2a (cross-trace noise): add zero-mean Gaussian noise per parameter-type,
+    # std = sigma_eps_rel * RMS(eps) computed across this batch's array.
+    # When sigma_eps_rel == 0 this is a no-op (multiply by zero).
+    def _add_noise(eps_arr, k):
+        rms = jnp.sqrt(jnp.mean(eps_arr ** 2) + 1e-12)
+        scale = perturbation.sigma_eps_rel * rms
+        noise = jax.random.normal(k, eps_arr.shape, dtype=eps_arr.dtype) * scale
+        return eps_arr + noise
+
+    k_eL, k_eT, k_eb, k_etau = jax.random.split(key, 4)
+    new_e_desc_w_L = _add_noise(new_e_desc_w_L, k_eL)
+    new_e_desc_w_T = _add_noise(new_e_desc_w_T, k_eT)
+    new_e_desc_b   = _add_noise(new_e_desc_b,   k_eb)
+    new_e_desc_tau = _add_noise(new_e_desc_tau, k_etau)
 
     new_cells = CellState(
         s=s_all, e_left=eL_all, e_top=eT_all, eta=eta_all,
@@ -231,11 +307,18 @@ def block_backward(
     dL_d_rate: jnp.ndarray,         # (M,) dL/dy at bottom shoreline this step
     topology: GridTopology,
     dt: float,
+    perturbation: Perturbation | None = None,
+    key: jnp.ndarray | None = None,
 ) -> BlockParams:
     """Single-timestep local backward. Returns per-parameter gradients for
     branch parameters; input_routing gradient returned as zero (encoder
     frozen by design). SnAP-1 past-only subtraction applied when using
     descendant cross-traces (same structure as the tree paper)."""
+    if perturbation is None:
+        perturbation = no_perturbation()
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
     N, M = topology.N, topology.M
     n = num_cells(topology)
 
@@ -252,16 +335,37 @@ def block_backward(
     dt_type = cp.w_left.dtype
     msg_init = jnp.zeros(n, dtype=dt_type).at[topology.bottom_col_cells].set(dL_d_rate)
 
+    # 2b: precompute msg-noise std relative to dL/d_rate RMS at this step.
+    # The msg array starts populated only at the bottom shoreline; using its
+    # RMS at the moment of read varies wildly during the backward sweep, so we
+    # fix the noise scale once based on the readout-message magnitude.
+    msg_rms = jnp.sqrt(jnp.mean(dL_d_rate ** 2) + 1e-12)
+    noise_std = perturbation.sigma_msg_rel * msg_rms
+
     dw_L = jnp.zeros(n, dtype=dt_type)
     dw_T = jnp.zeros(n, dtype=dt_type)
     dbias = jnp.zeros(n, dtype=dt_type)
     dlog_tau = jnp.zeros(n, dtype=dt_type)
 
-    def step(carry, idx):
+    # 1b helpers: scale m by gain_pos when m>0, gain_neg when m<0.
+    gp = perturbation.msg_gain_pos
+    gn = perturbation.msg_gain_neg
+
+    def _msg_perturb(m, k_noise):
+        # 2b additive noise, then 1b sign-asymmetric gain.
+        m_noisy = m + jax.random.normal(k_noise, m.shape, dtype=m.dtype) * noise_std
+        return jnp.where(m_noisy > 0, m_noisy * gp, m_noisy * gn)
+
+    # 1c: subtraction bias multiplies the eps^(1,d) term in the bracket.
+    sub_factor = 1.0 + perturbation.delta_sub
+
+    def step(carry, scan_in):
         msg, dwL, dwT, dB, dLT = carry
+        idx, k_msg_b, k_msg_d_below, k_msg_d_right = scan_in
         i, j = idx[0], idx[1]
         k = i * M + j
-        m_b = msg[k]
+        m_b_raw = msg[k]
+        m_b = _msg_perturb(m_b_raw, k_msg_b)
         omy2_b = omy2[k]
 
         # Self-path (spatial contribution through y_k -> m_k).
@@ -274,10 +378,11 @@ def block_backward(
         # {below, right}, we need:
         #    m_d * (1 - y_d^2) * past_eps^(1)[k,d]
         # where past_eps = eps(t+1) - current-step contribution.
-        def desc_term(desc_idx, slot):
+        def desc_term(desc_idx, slot, k_msg_d):
             has = desc_idx >= 0
             safe = jnp.maximum(desc_idx, 0)
-            m_d = msg[safe]
+            m_d_raw = msg[safe]
+            m_d = _msg_perturb(m_d_raw, k_msg_d)
             omy2_d = omy2[safe]
             a_d = a_all[safe]; c_d = c_all[safe]
             # Coefficient feeding y_k into descendant d.
@@ -287,21 +392,23 @@ def block_backward(
             # current-step self-feed contribution to eps_d:
             #   eps(t+1) = a eps(t) + c * w_feed * dy_dparam(t+1)
             # so past = eps(t+1) - c * w_feed * dy_dparam(t+1).
+            # 1c subtraction bias: scale eps^(1,d) by (1+delta_sub) relative
+            # to the current-step c_d * kappa_d * f term.
             dy_dL = omy2_b * cs.e_left[k]
             dy_dT = omy2_b * cs.e_top[k]
             dy_db = omy2_b
             dy_dlt = omy2_b * cs.eta[k] * tau_all[k]
 
-            past_L  = cs.e_desc_w_left[k, slot] - c_d * w_feed * dy_dL
-            past_T  = cs.e_desc_w_top [k, slot] - c_d * w_feed * dy_dT
-            past_b  = cs.e_desc_b     [k, slot] - c_d * w_feed * dy_db
-            past_lt = cs.e_desc_tau   [k, slot] - c_d * w_feed * dy_dlt
+            past_L  = sub_factor * cs.e_desc_w_left[k, slot] - c_d * w_feed * dy_dL
+            past_T  = sub_factor * cs.e_desc_w_top [k, slot] - c_d * w_feed * dy_dT
+            past_b  = sub_factor * cs.e_desc_b     [k, slot] - c_d * w_feed * dy_db
+            past_lt = sub_factor * cs.e_desc_tau   [k, slot] - c_d * w_feed * dy_dlt
 
             gate = jnp.where(has, m_d * omy2_d, 0.0)
             return (gate * past_L, gate * past_T, gate * past_b, gate * past_lt)
 
-        bL0, bT0, bB0, bLT0 = desc_term(topology.desc_below[k], 0)
-        bL1, bT1, bB1, bLT1 = desc_term(topology.desc_right[k], 1)
+        bL0, bT0, bB0, bLT0 = desc_term(topology.desc_below[k], 0, k_msg_d_below)
+        bL1, bT1, bB1, bLT1 = desc_term(topology.desc_right[k], 1, k_msg_d_right)
 
         dwL = dwL.at[k].set(dwL_self + bL0 + bL1)
         dwT = dwT.at[k].set(dwT_self + bT0 + bT1)
@@ -309,6 +416,8 @@ def block_backward(
         dLT = dLT.at[k].set(dLT_self + bLT0 + bLT1)
 
         # Propagate message to the two predecessors (top and left of k).
+        # Use the perturbed m_b: realistic analog readout failure compounds
+        # as messages traverse the grid.
         out_msg = m_b * cp.w_left[k] * omy2_b * c_all[k]  # flows to left predecessor
         out_msg_top = m_b * cp.w_top[k] * omy2_b * c_all[k]  # flows to top predecessor
 
@@ -326,8 +435,19 @@ def block_backward(
         )
         return (msg, dwL, dwT, dB, dLT), None
 
+    # Three independent streams of msg-noise per cell (for m_b, m_d_below, m_d_right).
+    # Single big split is faster than the vmap'd nested split.
+    all_keys = jax.random.split(key, n * 3)
+    keys_per_cell = all_keys.reshape((n, 3) + all_keys.shape[1:])
+    scan_inputs = (
+        topology.backward_order,
+        keys_per_cell[:, 0],
+        keys_per_cell[:, 1],
+        keys_per_cell[:, 2],
+    )
+
     (_, dw_L, dw_T, dbias, dlog_tau), _ = jax.lax.scan(
-        step, (msg_init, dw_L, dw_T, dbias, dlog_tau), topology.backward_order,
+        step, (msg_init, dw_L, dw_T, dbias, dlog_tau), scan_inputs,
     )
 
     return BlockParams(

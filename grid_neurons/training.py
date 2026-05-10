@@ -13,7 +13,10 @@ loss_mode:
 import jax
 import jax.numpy as jnp
 
-from .block import BlockParams, BlockState, block_backward, block_forward, zero_block_state
+from .block import (
+    BlockParams, BlockState, Perturbation, block_backward, block_forward,
+    no_perturbation, zero_block_state,
+)
 from .topology import GridTopology
 
 
@@ -32,22 +35,46 @@ def summed_ce(rates: jnp.ndarray, target: jnp.ndarray) -> jnp.ndarray:
 
 
 def run_forward(params: BlockParams, init_state: BlockState,
-                sequence: jnp.ndarray, topology: GridTopology, dt: float):
-    def step(state, x):
-        ns, rt, y_all, drives = block_forward(params, state, x, topology, dt)
+                sequence: jnp.ndarray, topology: GridTopology, dt: float,
+                perturbation: Perturbation | None = None,
+                fwd_keys: jnp.ndarray | None = None):
+    if perturbation is None:
+        perturbation = no_perturbation()
+
+    def step(state, scan_in):
+        x, k = scan_in
+        ns, rt, y_all, drives = block_forward(
+            params, state, x, topology, dt,
+            perturbation=perturbation, key=k,
+        )
         return ns, (state, rt, y_all, drives)
+
+    T = sequence.shape[0]
+    if fwd_keys is None:
+        fwd_keys = jax.random.split(jax.random.PRNGKey(0), T)
     final_state, (states_pre, rates, y_all_t, drives_t) = jax.lax.scan(
-        step, init_state, sequence,
+        step, init_state, (sequence, fwd_keys),
     )
     return final_state, rates, y_all_t, drives_t, states_pre
 
 
 def local_grads(params, init_state, sequence, target, topology, dt,
-                loss_mode="per_t"):
+                loss_mode="per_t",
+                perturbation: Perturbation | None = None,
+                key: jnp.ndarray | None = None):
+    if perturbation is None:
+        perturbation = no_perturbation()
+    if key is None:
+        key = jax.random.PRNGKey(0)
+    T = sequence.shape[0]
+    k_fwd, k_bwd = jax.random.split(key)
+    fwd_keys = jax.random.split(k_fwd, T)
+    bwd_keys = jax.random.split(k_bwd, T)
+
     final_state, rates, y_all_t, drives_t, states_pre = run_forward(
         params, init_state, sequence, topology, dt,
+        perturbation=perturbation, fwd_keys=fwd_keys,
     )
-    T = sequence.shape[0]
     if loss_mode == "sum":
         loss = summed_ce(rates, target)
         dL_d_r = jax.grad(lambda r: -jax.nn.log_softmax(r)[target])(rates.sum(0))
@@ -66,17 +93,21 @@ def local_grads(params, init_state, sequence, target, topology, dt,
         states_pre, final_state,
     )
 
-    def bw_step(acc, t):
+    def bw_step(acc, scan_in):
+        t, k = scan_in
         state_post_t = jax.tree_util.tree_map(lambda x: x[t], states_post_stack)
         g_t = block_backward(
             params=params, state_post=state_post_t,
             y_all=y_all_t[t], drives_all=drives_t[t],
             dL_d_rate=dL_d_rate_all[t], topology=topology, dt=dt,
+            perturbation=perturbation, key=k,
         )
         return jax.tree_util.tree_map(lambda a, b: a + b, acc, g_t), None
 
     zero_grad = jax.tree_util.tree_map(jnp.zeros_like, params)
-    total_grad, _ = jax.lax.scan(bw_step, zero_grad, jnp.arange(T))
+    total_grad, _ = jax.lax.scan(
+        bw_step, zero_grad, (jnp.arange(T), bwd_keys),
+    )
     return loss, total_grad, readout_from_rates(rates)
 
 
