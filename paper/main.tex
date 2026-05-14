@@ -327,6 +327,107 @@ expected cost of dropping both variance-reduction mechanisms; the
 point is that neither is \emph{required} for the local rule to drive
 the architecture above chance.
 
+\section{Robustness to measurement non-idealities}
+\label{sec:robustness}
+
+A practical concern for analog implementation is not just precision of
+storage---which the trace-quantisation ablation addresses---but
+\emph{bias} and \emph{noise} in the quantities the local rule
+\emph{measures} on each step.  Eq.\,\ref{eq:local-grad} reads three
+analog scalars per cell per descendant: the cross-trace
+$\varepsilon^{(1,d)}_{ij,\theta}$, the backward message $m_d$ on the
+descendant, and the current-step self-derivative $f_{\theta,ij}$
+gated by the subtraction $c_d\kappa_d f_{\theta,ij}$.  An imperfect
+readout introduces a (i)~scale offset on the message, possibly
+asymmetric in sign, (ii)~a slow leak on the analog capacitor that
+holds $\varepsilon$, (iii)~a gain mismatch between the
+$\varepsilon^{(1,d)}$ term and the subtractive $c_d\kappa_d f$ term in
+the bracket, and (iv)~zero-mean Gaussian noise on the readout of
+either $\varepsilon$ or $m$.  We instrumented the SnAP-$1$ rule with
+six knobs covering these:
+
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item \textbf{1a, trace leak.} Cross-trace retention is
+  $a_d(1{-}\delta_{\text{leak}})$ instead of $a_d$.
+\item \textbf{1b, message gain.} The backward message $m$ is scaled
+  by $g_+$ when positive and $g_-$ when negative.  Symmetric
+  ($g_\pm=1{-}\delta$) and sign-asymmetric ($g_+{=}1{\mp}\delta,\;g_-{=}1{\pm}\delta$).
+\item \textbf{1c, subtraction bias.} The bracket of
+  Eq.\,\ref{eq:local-grad} becomes
+  $[(1{+}\delta_{\text{sub}})\varepsilon^{(1,d)} - c_d\kappa_d f]$.
+\item \textbf{2a, cross-trace noise.}
+  $\varepsilon^{(1,d)}\!\leftarrow\!\varepsilon^{(1,d)}+\mathcal N(0,\sigma^2)$ per update,
+  $\sigma\!=\!\sigma_{\text{rel}}\cdot\mathrm{RMS}(\varepsilon)$.
+\item \textbf{2b, message noise.}
+  $m\!\leftarrow\!m+\mathcal N(0,\sigma^2)$ at each read,
+  $\sigma$ scaled to the readout-message RMS.
+\item \textbf{2c, combined.} Both 2a and 2b at matched $\sigma_{\text{rel}}$.
+\end{itemize}
+All knobs live in the \emph{learning path only}; forward dynamics are
+untouched.  Defaults are no-op and the single-step gradient-agreement
+check still matches BPTT at float-$64$ $\epsilon$.
+
+\paragraph{Scope.}
+To keep the sweep tractable we ran at $6{,}000$ training images, $5$
+epochs, batch $32$, single seed (otherwise the spec'd Section\,\ref{sec:mnist}
+config).  The unperturbed baseline is $0.269$ final val acc; within-seed
+run-to-run noise at this scale is approximately $\pm 0.02$.  Differential
+effects below that floor are not resolved; the question is which knobs
+break the rule \emph{above} the floor.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{../experiments/measurement_robustness/plots/summary.png}
+  \caption{SnAP-$1$ rule robustness on the $28\times 10$ grid.  Bias
+    (left) and zero-mean Gaussian precision noise (right) on the
+    quantities Eq.\,\ref{eq:local-grad} reads.  Dashed line: unperturbed
+    baseline ($0.269$).  Random chance is $0.10$.  Single seed,
+    6k train images, 5 epochs.}
+  \label{fig:robustness}
+\end{figure}
+
+\paragraph{What we found.}
+The data refines---and partly overturns---the priors we set going in
+(Fig.\,\ref{fig:robustness}).
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+\item The cross-trace storage (1a, 2a) and the subtraction bracket
+  (1c) are \emph{robust}: at the swept ranges
+  $|\delta_{\text{leak}}|\!\le\!0.20$,
+  $|\delta_{\text{sub}}|\!\le\!0.10$, and
+  $\sigma_{\varepsilon}/\mathrm{RMS}\!\le\!0.5$, no drop exceeds
+  $0.025$.  In particular,
+  the past-only subtraction $[\varepsilon^{(1,d)}-c_d\kappa_d f]$, which
+  the SnAP-$1$ derivation hinges on, tolerates a $\pm 10\%$ gain
+  mismatch with no measurable damage.
+\item The backward-message path (1b sign-asym, 2b, 2c) is
+  \emph{catastrophically} fragile.  Sign-asymmetric gain breaks the
+  rule at $\delta\!=\!0.05$ (drop $0.06$) and collapses it to chance
+  by $\delta\!=\!0.10$ (drop $0.16$).  Additive Gaussian noise on the
+  message collapses learning already at
+  $\sigma/\mathrm{RMS}\!=\!0.01$ (drop $0.11$).  Symmetric message
+  gain, on the other hand, is fine, even slightly beneficial at
+  $\delta\!=\!0.2$ (drop $-0.01$)---an effective learning-rate scale.
+\item The qualitative picture is therefore not ``bias vs.\
+  precision'' but ``\emph{which scalar gets perturbed}''.  The
+  backward message $m$ is the gradient signal itself; any
+  sign-asymmetric distortion or additive noise on its readout
+  propagates directly into a biased gradient and stops learning.  The
+  cross-trace and the subtraction term are integrative quantities and
+  absorb single-step perturbations.
+\end{itemize}
+
+\paragraph{Co-design implication.}
+For an analog implementation of this rule, tolerance budget should be
+spent on the message-readout path: low-noise differential readout with
+matched sign-gain (no $g_+\!\neq\!g_-$ asymmetry larger than a few
+percent).  The cross-trace capacitor's leak and the
+$\varepsilon$-versus-$c_d\kappa_d f$ subtraction can be looser
+specs---several percent mismatch and $\sigma$ up to half the RMS of
+$\varepsilon$ produce no measurable harm at the scale tested.  Tighter
+tolerance numbers, and confirmation of these effects vs.\ run-to-run
+noise, require multi-seed runs at full Section\,\ref{sec:mnist} scale
+(60k training images), deferred for follow-up.
+
 \appendix
 
 \section{Architectural ablations}

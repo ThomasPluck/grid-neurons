@@ -6,11 +6,11 @@ Unperturbed baseline final val acc: **0.269** (chance = 0.10).
 
 ## Headline plot
 
-![](experiments/measurement_robustness/plots/summary.png)
+![](plots/summary.png)
 
 ## Bias sweeps
 
-![](experiments/measurement_robustness/plots/bias.png)
+![](plots/bias.png)
 
 Final val accuracy per condition:
 
@@ -48,7 +48,7 @@ Final val accuracy per condition:
 
 ## Precision sweeps
 
-![](experiments/measurement_robustness/plots/precision.png)
+![](plots/precision.png)
 
 Final val accuracy per condition:
 

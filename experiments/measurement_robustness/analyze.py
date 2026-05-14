@@ -32,8 +32,8 @@ SWEEP_LABELS = {
     "1b_gain_asym_A":     r"1b msg gain (asym A)  $g_+=1{-}\delta,\ g_-=1{+}\delta$",
     "1b_gain_asym_B":     r"1b msg gain (asym B)  $g_+=1{+}\delta,\ g_-=1{-}\delta$",
     "1c_subtraction":     r"1c subtraction  $(1{+}\delta_\text{sub})\,\varepsilon - c_d \kappa_d f$",
-    "2a_eps_noise":       r"2a cross-trace noise  $\varepsilon{+}\mathcal N(0,\sigma^2)$",
-    "2b_msg_noise":       r"2b message noise  $m{+}\mathcal N(0,\sigma^2)$",
+    "2a_eps_noise":       r"2a cross-trace noise  $\varepsilon + N(0,\sigma^2)$",
+    "2b_msg_noise":       r"2b message noise  $m + N(0,\sigma^2)$",
     "2c_combined_noise":  r"2c both",
 }
 
@@ -63,10 +63,12 @@ def load_results(results_dir: str) -> dict[str, pd.DataFrame]:
 
 
 def per_condition_final(df: pd.DataFrame) -> pd.DataFrame:
-    """For each (experiment, value, seed), take the final epoch's row."""
+    """For each (experiment, value, seed), take the final epoch's row.
+    Returns rows sorted by ``value`` ascending so plots draw monotone lines."""
     last = (df.sort_values("epoch")
               .groupby(["experiment", "value", "seed"], as_index=False)
               .tail(1)
+              .sort_values("value")
               .reset_index(drop=True))
     return last
 
@@ -357,19 +359,39 @@ def _md_table_for_sweeps(table: pd.DataFrame, sweeps: Iterable[str],
     return "\n".join(rows)
 
 
+def _max_drop(table: pd.DataFrame, sweeps: Iterable[str]) -> tuple[str | None, float, float | None]:
+    """Across the given sweeps, find the (sweep, drop, value) with the largest
+    drop_from_baseline. Returns (sweep_name, drop, value_at_worst)."""
+    worst_s, worst_d, worst_v = None, -float("inf"), None
+    for s in sweeps:
+        sub = table[table["sweep"] == s]
+        if len(sub) == 0:
+            continue
+        idx = sub["drop_from_baseline"].idxmax()
+        d = float(sub.loc[idx, "drop_from_baseline"])
+        if d > worst_d:
+            worst_s, worst_d, worst_v = s, d, float(sub.loc[idx, "value"])
+    if worst_s is None:
+        return None, 0.0, None
+    return worst_s, worst_d, worst_v
+
+
 def _discussion_paragraphs(table: pd.DataFrame, base: float | None) -> list[str]:
-    """A short, draftable discussion. Builds bullet-style key numbers from the
-    sweep results so the message has actual content the user can lift verbatim."""
+    """Data-driven discussion. Phrasing is chosen by what the data actually
+    shows: which sweeps broke, how the bias vs precision categories compare,
+    and whether the headline matches or contradicts the priors set in the
+    experiment plan. Numbers come from the summary table."""
     out: list[str] = []
 
-    # Find the first delta/sigma at which each sweep drops more than 0.05 below baseline.
-    threshold = 0.05
+    threshold = 0.05         # "clear break" threshold (val-acc drop)
+    noise_floor = 0.02       # rough within-seed noise estimate at this scale
+
+    # Per-sweep break point bullets (signed where 1c is concerned).
     bullets = [f"Key numbers (drop $\\ge$ {threshold:.2f} below the unperturbed baseline):"]
     bullets.append("")
     for s in BIAS_SWEEPS + PRECISION_SWEEPS:
         if s not in table["sweep"].unique():
             continue
-        # 1c subtraction has both signs swept; report each direction independently.
         if s == "1c_subtraction":
             sides = first_breaking_signed(table, s, drop_threshold=threshold)
             pos_v, pos_d = sides["+"]
@@ -402,48 +424,148 @@ def _discussion_paragraphs(table: pd.DataFrame, base: float | None) -> list[str]
     out.extend(bullets)
     out.append("")
 
-    # Three short paragraphs that the user can lift verbatim.
-    out.append(
-        "Comparing across sweeps, the SnAP-$1$ rule on the rectangular grid "
-        "is markedly more sensitive to systematic *bias* in its measured "
-        "quantities than to zero-mean *precision* errors. The headline plot "
-        "shows bias degradation kicking in already at $\\delta\\sim 0.05$ for "
-        "the most fragile variant, while the precision sweeps show the model "
-        "absorbing additive Gaussian noise on the cross-trace and on the "
-        "backward message even at $\\sigma$ comparable to the RMS of the "
-        "measured quantity."
-    )
+    # Worst-sweep summary per category, used to drive the narrative.
+    present_bias = [s for s in BIAS_SWEEPS if s in table["sweep"].unique()]
+    present_prec = [s for s in PRECISION_SWEEPS if s in table["sweep"].unique()]
+    b_s, b_d, b_v = _max_drop(table, present_bias)
+    p_s, p_d, p_v = _max_drop(table, present_prec)
+
+    # Worst within the bias category (used for the "1c-vs-others" claim test).
+    worst_in_bias = b_s
+    sweeps_with_real_effect = [
+        s for s in present_bias + present_prec
+        if float(table[table["sweep"] == s]["drop_from_baseline"].max()) > noise_floor
+    ]
+
+    # Paragraph 1: headline finding based on the actual numbers.
+    if b_d <= noise_floor and p_d <= noise_floor:
+        out.append(
+            f"At this scale ({_scale_phrase()}), every condition swept --- "
+            f"bias and precision alike --- stays within roughly $\\pm{noise_floor:.2f}$ "
+            f"of the unperturbed baseline (final val acc "
+            f"{base:.3f}). The worst point we observed across all "
+            f"{len(present_bias)+len(present_prec)} sweeps is a drop of "
+            f"{max(b_d, p_d):.3f}, which is at or below the within-seed run-to-run "
+            "noise this configuration can resolve. We cannot, from this data, "
+            "claim a measurable difference between the bias and precision "
+            "axes; the honest reading is that the local SnAP-$1$ rule is "
+            "robust to **all of the tested measurement non-idealities** at "
+            "the few-percent level over the swept ranges. Resolving smaller "
+            "effects requires either multi-seed averaging or the full "
+            f"Section\\,\\ref{{sec:mnist}}-scale baseline (60k train images, "
+            "~0.52 val acc, ~5$\\times$ the distance from chance)."
+        )
+    elif b_d > p_d:
+        out.append(
+            f"At this scale ({_scale_phrase()}), bias perturbations degrade "
+            "the rule more than zero-mean precision noise does. The worst "
+            f"bias condition is **{b_s}** at "
+            f"{_xlabel_short(b_s)} = {b_v:+.3g} (drop {b_d:.3f} below the "
+            f"{base:.3f} baseline). The worst precision condition is "
+            f"**{p_s}** at $\\sigma/\\text{{RMS}}={p_v:.3g}$ "
+            f"(drop {p_d:.3f}). The asymmetry matches the qualitative "
+            "expectation that systematic offsets violate the rule's "
+            "correctness derivation while zero-mean noise gets absorbed by "
+            "the optimiser."
+        )
+    elif p_d > b_d:
+        out.append(
+            f"At this scale ({_scale_phrase()}), additive precision noise "
+            "degrades the rule more than the tested bias perturbations do --- "
+            "which contradicts the prior expectation set in the experiment "
+            f"plan. The worst precision condition is **{p_s}** at "
+            f"$\\sigma/\\text{{RMS}}={p_v:.3g}$ (drop {p_d:.3f} below the "
+            f"{base:.3f} baseline). The worst bias condition is **{b_s}** "
+            f"at {_xlabel_short(b_s)} = {b_v:+.3g} (drop {b_d:.3f})."
+        )
+    else:
+        out.append(
+            f"At this scale ({_scale_phrase()}), the worst bias drop "
+            f"({b_d:.3f}, at **{b_s}**) is comparable to the worst precision "
+            f"drop ({p_d:.3f}, at **{p_s}**)."
+        )
     out.append("")
-    out.append(
-        "The biggest single sensitivity is the **anti-double-count subtraction "
-        "bias (1c)**, which decides how cleanly the bracket "
-        "$[\\,\\varepsilon^{(1,d)} - c_d\\kappa_d f\\,]$ in Eq.\\,8 cancels its "
-        "current-step self-feed term. Even small mismatches between the gain "
-        "of the cross-trace term and the gain of the subtractive current-step "
-        "term break the past-only structure that SnAP-$1$ relies on, and the "
-        "rule then optimises a biased gradient. By contrast, scaling messages "
-        "or trace-leak coefficients keeps the rule's *form* intact and the "
-        "optimiser can absorb the effective rescaling. This matches the "
-        "expectation we set in the experiment plan: bias on a quantity the "
-        "rule's correctness derivation relies on is qualitatively worse than "
-        "bias on a quantity that just gets scaled."
-    )
+
+    # Paragraph 2: how 1c compares to the other bias sweeps.
+    if "1c_subtraction" in present_bias:
+        d_1c = float(table[table["sweep"] == "1c_subtraction"]["drop_from_baseline"].max())
+        other_bias = [s for s in present_bias if s != "1c_subtraction"]
+        d_other = float("-inf")
+        s_other = None
+        for s in other_bias:
+            sub = table[table["sweep"] == s]
+            if len(sub) == 0:
+                continue
+            dd = float(sub["drop_from_baseline"].max())
+            if dd > d_other:
+                d_other = dd; s_other = s
+        if d_1c > d_other + noise_floor:
+            out.append(
+                "Within the bias category, **1c (subtraction)** is "
+                "the most fragile of the bias variants --- max drop "
+                f"{d_1c:.3f} vs at most {d_other:.3f} for {s_other}. "
+                "This is consistent with the structural argument that "
+                "incomplete cancellation between $\\varepsilon^{(1,d)}$ "
+                "and the current-step $c_d\\kappa_d f$ in "
+                "Eq.\\,\\ref{eq:local-grad} directly biases the gradient, "
+                "while gain or leak biases just rescale terms the rule "
+                "uses."
+            )
+        elif worst_in_bias != "1c_subtraction":
+            out.append(
+                "Within the bias category, **1c (subtraction)** is **not** "
+                "the most fragile variant in this run: it tops out at a "
+                f"{d_1c:.3f} drop, while {worst_in_bias} reaches "
+                f"{b_d:.3f}. This contradicts the prior expectation that "
+                "the past-only subtraction would be the dominant "
+                "sensitivity; at this scale, the data suggests gain / "
+                "leak biases damage learning at least as much as a "
+                "subtraction-cancellation mismatch."
+            )
+        else:
+            out.append(
+                "Within the bias category, 1c (subtraction) and the "
+                "gain / leak biases produce comparable degradation in "
+                f"this run (max drops {d_1c:.3f} vs {d_other:.3f}). "
+                "We cannot resolve a clean 'most-fragile' answer from "
+                "the single-seed data."
+            )
     out.append("")
-    out.append(
-        "The takeaway for circuit co-design is concrete: precision matters "
-        "much less than offset / gain matching, and within the bias category "
-        "the cross-trace-vs-current-step subtraction in the local rule should "
-        "be implemented with carefully matched gains, ideally as a "
-        "differential measurement that cancels common-mode error. Trace-leak "
-        "and message-gain non-idealities are tolerated up to several percent "
-        "with little degradation, so spec budgets there can be relatively "
-        "loose. Additive zero-mean readout noise on the cross-traces and on "
-        "the backward messages is a soft constraint --- meaningful "
-        "degradation requires $\\sigma$ on the order of the RMS of the signal "
-        "itself."
-    )
+
+    # Paragraph 3: co-design takeaway, scaled to what the data actually shows.
+    if not sweeps_with_real_effect:
+        out.append(
+            "**Co-design implication.** The data does not yet support a "
+            "specific tightening of any one analog-readout spec. What it "
+            "does support is that single-digit-percent gain / leak / "
+            "subtraction biases and Gaussian readout noise up to "
+            "$\\sigma\\sim\\text{RMS}$ on either the cross-trace or the "
+            "backward message are not catastrophic for this rule on this "
+            "topology. A follow-up at the full Section\\,\\ref{sec:mnist} "
+            "scale --- 60k training images, multiple seeds --- is the "
+            "right next experiment before quoting any particular tolerance "
+            "to circuit designers."
+        )
+    else:
+        out.append(
+            "**Co-design implication.** The sweeps in "
+            f"{{ {', '.join(sweeps_with_real_effect)} }} exhibit a "
+            "clear-of-noise effect, while the remainder are tolerated at "
+            "the few-percent level. For silicon design this argues for "
+            "spending tolerance budget on the failure modes that "
+            "produced visible drops above and accepting looser specs on "
+            "the rest. A full-scale rerun (60k train, $\\ge 3$ seeds) "
+            "would give tighter tolerance numbers for the affected "
+            "knobs."
+        )
 
     return out
+
+
+def _scale_phrase() -> str:
+    """Phrase describing the train scale; kept as a single string so the
+    discussion paragraphs read naturally regardless of which config we ran."""
+    return "6k train, 5 epochs, single seed; resolution roughly 0.02 val acc"
 
 
 def _xlabel_short(sweep: str) -> str:
