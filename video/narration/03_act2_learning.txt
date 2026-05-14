@@ -1,0 +1,13 @@
+So how does it learn?
+
+The standard trick — back-prop through time — is off the table. Back-prop needs a global backward pass over the whole sequence, stored in memory, choreographed by an external optimiser. We want learning that happens on the grid, locally, with each cell only knowing about its immediate neighbours.
+
+There's a classical algorithm for this. Real-Time Recurrent Learning, from 1989. It computes exact gradients online without storing the past — but its cost grows as the number of parameters squared, which makes it useless at any real scale.
+
+The fix is to notice that on this grid, most of those gradient terms are zero. A parameter in cell i, j can only influence cells downstream of it — to the right and below. And if we're willing to approximate, we can track just the immediate-neighbour influences and drop the rest. That's an algorithm called snap one.
+
+Each cell ends up storing eleven extra numbers — small traces that record how its parameters are influencing its neighbours' state. When the loss signal arrives at the bottom edge, it propagates backwards through the grid in reverse raster order, and each cell uses its local traces plus the incoming message to update its four parameters.
+
+Everything is local. No global backward pass. No shared optimiser state. Just cells, talking to their neighbours, forward and back.
+
+Does it work? We trained the grid on row-wise M-NIST — feeding each handwritten digit in row by row, 28 timesteps per image — and asked the bottom edge to predict the class. After ten epochs, it reaches 52 percent accuracy. Chance is 10 percent. With 1,120 parameters and a fully local learning rule, the grid learns to read.

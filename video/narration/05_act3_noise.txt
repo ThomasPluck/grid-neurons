@@ -1,0 +1,11 @@
+This is the part that matters if you ever want to build this in silicon. Because real chips are noisy. Capacitors leak. Readouts drift. Amplifiers don't quite have the gain you specified. The question isn't whether the rule tolerates some noise — it's which noise.
+
+So we tested six things. Three bias-style errors: a leak on the trace storage, a gain mismatch on the backward message, a gain mismatch on a particular subtraction in the update rule. And three precision-style errors: Gaussian noise on the trace, on the backward message, and on both.
+
+Most of these turned out to be fine.
+
+You can leak the trace capacitors by 20 percent per step. No measurable damage. You can add Gaussian noise to the trace at half the R M S of the trace itself. No measurable damage. You can mismatch the subtraction term by 10 percent. No measurable damage.
+
+But one path is brutal. The backward message — the actual gradient signal flowing from the output back through the grid — is unforgiving. Add asymmetric gain on its sign, and learning collapses at five percent. Add Gaussian noise at one percent of its R M S, and it collapses entirely.
+
+The cross-traces are integrative — they average over time, so noise on them gets smoothed out. The backward message is the gradient direction itself. Corrupt that, and you're not learning anymore. You're doing a random walk in parameter space.

@@ -1,0 +1,17 @@
+# Generated artefacts
+audio/
+clips/
+stitched/
+output/
+media/
+concat_list.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+
+# OS
+.DS_Store

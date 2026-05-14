@@ -1,0 +1,7 @@
+Start with a single cell. It does almost nothing. It takes two inputs — one from its left neighbour, one from above — and combines them with two learnable weights. That sum goes into a leaky integrator with a learnable timescale, then through a tanh nonlinearity with a learnable bias.
+
+Four numbers per cell. That's all the learning capacity it has.
+
+Now tile it. A rectangular grid, 28 cells tall, 10 cells wide. Every cell is identical in structure — same equations, same four parameters — but the parameter values are different. The cells along the left edge take external input. The cells along the bottom edge produce the output. Top and right edges go nowhere; they're the boundary of the world.
+
+When you feed a signal in from the left, activity propagates rightward and downward through the grid, cell by cell, in raster order. That's the forward pass. There's no separate neural network running inside any cell. The cells are the network.

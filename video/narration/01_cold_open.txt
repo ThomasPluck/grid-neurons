@@ -1,0 +1,7 @@
+You've probably seen a cellular automaton. A grid of identical cells, each running the same simple rule based on its neighbours. Out of those local rules, complex global patterns emerge — gliders, oscillators, sometimes even computation.
+
+A few years ago, people started asking: what if those rules were learned, instead of hand-designed? That's the idea behind Neural Cellular Automata — you train a small neural network, and you run a copy of it inside every cell.
+
+But there's a strange thing about that setup. The neural network is doing the learning. The cellular automaton is just the stage it performs on. The grid itself learns nothing.
+
+So here's the question we asked instead. What if you flip it? What if the cellular automaton is the neural network — and the grid dynamics themselves do the learning?

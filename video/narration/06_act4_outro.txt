@@ -1,0 +1,9 @@
+Two reasons to care about this.
+
+The first is silicon. Every operation in this system — the integrator, the tanh, the local trace update — maps cleanly onto a standard analog crossbar primitive. Nothing here needs a G P U. The forward pass is physics. The backward pass is more physics. The learning rule is a few capacitors and a multiplier per cell. And now we know which parts of that circuit need to be precise — the backward message readout — and which parts can be sloppy and cheap.
+
+That's a co-design result. Most neuromorphic hardware papers tell you their architecture is hardware-friendly because it's parallelisable. So is a matrix multiply. The interesting question is whether learning itself can be local, on the chip, without an external optimiser. For this grid, the answer is yes — within a precision budget we can now quantify.
+
+The second reason is more speculative, but worth saying. Cortex is a roughly planar sheet of nearly-identical units, doing local computation, with most of its connectivity confined to nearby cells. We're not claiming the brain works like this grid. But the brain has to solve a similar problem — credit assignment, locally, on a topology that doesn't admit a clean backward pass. Knowing which classes of noise break local learning, and which don't, is at least a useful constraint on the kinds of mechanisms that could plausibly be doing it.
+
+What's next? The fragility result points somewhere specific. If the backward message is the failure mode, you want infrastructure that broadcasts it cleanly over long distances — something like a hierarchical projection layered on top of the grid. In the brain, that role is played by subcortical structures. In silicon, it could be a tree of routing buffers above the grid plane. But that's the next paper. For now: a continuous cellular automaton learns to read handwritten digits, and we know what it would take to put it on a chip.

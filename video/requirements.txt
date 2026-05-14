@@ -1,0 +1,5 @@
+manim>=0.18
+elevenlabs>=1.0
+mutagen
+python-dotenv
+numpy

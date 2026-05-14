@@ -1,0 +1,9 @@
+Quick aside on the learning rule, for the curious. If you're happy taking "local rule, eleven scalars per cell" on faith, skip ahead by about a minute.
+
+The exact thing you'd ideally compute is a tensor: for every parameter in every cell, how does it currently influence every other cell's state? Call it epsilon. There's one of these for every parameter-cell pair, and on a 280-cell grid with four parameters each, that's well over a million numbers. Tracking all of them online is the original R T R L algorithm, and it's why nobody uses R T R L.
+
+But on this grid, most of those numbers are zero. A parameter in cell i, j can only affect cells downstream of it — to the right and below. The cone of cells it actually reaches grows quadratically with distance. At one step out, two cells. At two steps, six. At five steps, twenty-one.
+
+Snap one is the crudest possible truncation. Forget about every cell more than one step away. Each cell tracks three self-traces, for how its own parameters move its own state, plus one cross-trace per neighbour per parameter — eight in total, for the cell below and the cell to the right. Eleven scalars, all updated by the same local rule: a leaky accumulator of how this cell's parameter changes are pushing on its neighbour's state.
+
+At a single timestep, this is exact. We checked — the gradients match back-prop through time to floating-point precision. Over many timesteps, it diverges, because the influence that should have flowed two and three hops away gets dropped on the floor. How much does that cost in accuracy? That's the empirical question the training curve answers. Apparently, not enough to stop it learning.
